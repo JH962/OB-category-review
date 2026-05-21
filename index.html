@@ -596,6 +596,15 @@ function getMimeFromDataUrl(dataUrl) {
   return mimeMatch ? mimeMatch[1].toLowerCase() : '';
 }
 
+function dataUrlToBlob(dataUrl) {
+  const [meta, b64] = dataUrl.split(',');
+  const mime = (meta.match(/:(.*?);/) || [])[1] || 'image/png';
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type: mime });
+}
+
 function removeArtificialEdgeBackground(d, w, h) {
   function isArtificialBg(idx) {
     const pi = idx * 4, a = d[pi + 3];
@@ -955,11 +964,12 @@ async function runAiImageReview(itemId) {
 
 // ── remove.bg API 클렌징 (권장: 오브제 제거 + 패키지 보존) ──────────────
 async function cleanseWithRemoveBg(dataUrl, apiKey) {
-  const sep = dataUrl.indexOf(',');
-  const b64 = dataUrl.slice(sep + 1);
+  const mime = getMimeFromDataUrl(dataUrl) || 'image/png';
+  const ext = mime.includes('jpeg') ? 'jpg' : mime.includes('webp') ? 'webp' : 'png';
+  const blob = dataUrlToBlob(dataUrl);
 
   const formData = new FormData();
-  formData.append('image_file_b64', b64);
+  formData.append('image_file', blob, `product.${ext}`);
   formData.append('type', 'product');   // product 모드: 메인 제품만 남기고 오브제 제거
   formData.append('size', 'auto');
 
@@ -978,12 +988,12 @@ async function cleanseWithRemoveBg(dataUrl, apiKey) {
     throw new Error(errMsg);
   }
 
-  const blob = await res.blob();
+  const outBlob = await res.blob();
   const rawDataUrl = await new Promise((resolve, reject) => {
     const reader = new FileReader();
     reader.onload = e => resolve(e.target.result);
     reader.onerror = () => reject(new Error('이미지 변환 실패'));
-    reader.readAsDataURL(blob);
+    reader.readAsDataURL(outBlob);
   });
 
   // 실제 알파 PNG로 나오므로 바로 정규화
@@ -1381,11 +1391,6 @@ async function runAiCleansAndReview(itemId, method = 'auto') {
   item.loadingMsg = null;
   render();
 
-  // AI 검수는 항상 원본 이미지로 병렬 실행
-  const reviewPromise = hasGm
-    ? reviewImageWithGemini(item.img.dataUrl, geminiKey).catch(e => ({ error: e.message }))
-    : Promise.resolve(null);
-
   try {
     if (resolvedMethod === 'removebg') {
       // remove.bg: 배경·오브제 제거 + 크기 정규화 (Gemini 이미지 생성 거치지 않음)
@@ -1407,7 +1412,13 @@ async function runAiCleansAndReview(itemId, method = 'auto') {
     item.cleanError = e.message || String(e);
   }
 
-  item.aiReview   = await reviewPromise;
+  if (item.cleanData?.dataUrl && hasGm) {
+    item.loadingMsg = '🔎 결과 이미지 검수 중...';
+    render();
+    item.aiReview = await reviewImageWithGemini(item.cleanData.dataUrl, geminiKey).catch(e => ({ error: e.message }));
+  } else {
+    item.aiReview = null;
+  }
   item.loadingMsg = null;
   render();
 }
@@ -1583,7 +1594,10 @@ function itemStatus(item) {
   const aiIssues = item.aiReview && item.aiReview !== 'loading' && !item.aiReview.error && item.aiReview.checks
     ? item.aiReview.checks.map(c => ({ k: c.status }))
     : [];
-  const all = [...item.tv.issues, ...(item.img ? item.img.valid.issues : [IMAGE_REQUIRED_ISSUE]), ...aiIssues];
+  const imageValidationIssues = item.cleanData?.dataUrl && item.cleanData.valid
+    ? item.cleanData.valid.issues
+    : (item.img ? item.img.valid.issues : [IMAGE_REQUIRED_ISSUE]);
+  const all = [...item.tv.issues, ...imageValidationIssues, ...aiIssues];
   if (all.some(i => i.k === 'error')) return 'error';
   if (all.some(i => i.k === 'warn' || i.k === 'info')) return 'warn';
   return 'ok';
@@ -1700,7 +1714,10 @@ function renderCard(item) {
   const aiIssues = item.aiReview && item.aiReview !== 'loading' && !item.aiReview.error && item.aiReview.checks
     ? item.aiReview.checks.map(c => ({ k: c.status }))
     : [];
-  const imgIssues = [...(item.img ? item.img.valid.issues : [IMAGE_REQUIRED_ISSUE]), ...aiIssues];
+  const imageValidationIssues = item.cleanData?.dataUrl && item.cleanData.valid
+    ? item.cleanData.valid.issues
+    : (item.img ? item.img.valid.issues : [IMAGE_REQUIRED_ISSUE]);
+  const imgIssues = [...imageValidationIssues, ...aiIssues];
   const imgSt = statusOf(imgIssues);
 
   const textBad = textSt === 'error' || textSt === 'warn';
