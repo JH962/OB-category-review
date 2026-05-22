@@ -590,6 +590,39 @@ function getContentBBox(d, w, h, alphaThresh) {
   return maxX < 0 ? null : { minX, maxX, minY, maxY };
 }
 
+function getRobustContentBBox(d, w, h, alphaThresh) {
+  const thr = alphaThresh ?? 18;
+  const colCounts = new Uint32Array(w);
+  const rowCounts = new Uint32Array(h);
+  let maxCol = 0, maxRow = 0;
+
+  for (let y = 0; y < h; y++) {
+    let row = 0;
+    for (let x = 0; x < w; x++) {
+      if (d[(y * w + x) * 4 + 3] > thr) {
+        colCounts[x]++;
+        row++;
+      }
+    }
+    rowCounts[y] = row;
+    if (row > maxRow) maxRow = row;
+  }
+  for (let x = 0; x < w; x++) {
+    if (colCounts[x] > maxCol) maxCol = colCounts[x];
+  }
+
+  const minCol = Math.max(8, Math.round(maxCol * 0.10));
+  const minRow = Math.max(8, Math.round(maxRow * 0.10));
+  let minX = 0, maxX = w - 1, minY = 0, maxY = h - 1;
+  while (minX < w && colCounts[minX] < minCol) minX++;
+  while (maxX >= 0 && colCounts[maxX] < minCol) maxX--;
+  while (minY < h && rowCounts[minY] < minRow) minY++;
+  while (maxY >= 0 && rowCounts[maxY] < minRow) maxY--;
+
+  if (minX > maxX || minY > maxY) return getContentBBox(d, w, h, thr);
+  return { minX, maxX, minY, maxY };
+}
+
 function cleanupDetachedResidue(d, w, h, alphaThresh) {
   const thr = alphaThresh ?? 18;
   const total = w * h;
@@ -640,12 +673,12 @@ function cleanupDetachedResidue(d, w, h, alphaThresh) {
 function removeShadowFringe(d, w, h) {
   for (let i = 0; i < w * h; i++) {
     const pi = i * 4, a = d[pi + 3];
-    if (a <= 0 || a > 110) continue;
+    if (a <= 0) continue;
     const r = d[pi], g = d[pi + 1], b = d[pi + 2];
     const max = Math.max(r, g, b), min = Math.min(r, g, b);
     const sat = max === 0 ? 0 : (max - min) / max;
-    const shadowLike = max < 150 && sat < 0.35;
-    const greenResidue = g > 95 && g - r > 18 && g - b > 22;
+    const shadowLike = a <= 135 && max < 170 && sat < 0.38;
+    const greenResidue = g > 90 && g - r > 12 && g - b > 18 && (a <= 210 || max < 180);
     if (shadowLike || greenResidue) d[pi + 3] = 0;
   }
 }
@@ -767,7 +800,7 @@ async function normalizeProductPng(srcDataUrl, options = {}) {
         srcCtx.putImageData(imgData, 0, 0);
       }
 
-      const bbox = getContentBBox(d, sw, sh, 18);
+      const bbox = getRobustContentBBox(d, sw, sh, 18);
       if (!bbox) { reject(new Error('내용물을 찾을 수 없습니다')); return; }
 
       const contentW = bbox.maxX - bbox.minX + 1;
@@ -1237,6 +1270,8 @@ async function removeObjectsWithGemini(dataUrl, apiKey) {
 
 ━━ 절대 변경 금지 ━━
 - 제품 패키지 자체 (색상, 텍스트, 로고, 일러스트, 형태 모두)
+- 패키지 글자·로고를 OCR처럼 읽어서 다시 쓰지 마세요. 원본 픽셀 그대로 보존하세요.
+- 글자를 또렷하게 만들려고 재타이핑하거나 새 폰트로 바꾸지 마세요.
 - 이미 투명 처리된 배경 영역 → 그대로 투명 유지
 - 제품의 전체 실루엣과 크기
 
@@ -1325,6 +1360,8 @@ async function correctAngleWithGemini(dataUrl, apiKey) {
 
 ━━ 절대 변경 금지 ━━
 - 패키지의 모든 색상, 텍스트, 로고, 일러스트
+- 패키지 글자·로고를 읽어서 다시 그리거나 새 글꼴로 재생성하지 마세요.
+- 텍스트 선명화보다 원본 픽셀 보존이 우선입니다.
 - 투명 배경 영역 (배경 새로 생성하거나 색상 채우기 금지)
 
 ━━ 배치 & 출력 ━━
@@ -1439,6 +1476,8 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 선택한 제품 외의 다른 제품, 장식 오브제, 스티커, 텍스트 배지, 배경 요소는 모두 제거해줘
 - 선택한 제품 패키지 자체는 원본 픽셀을 최대한 유지해줘
 - 제품의 로고, 글자, 색상, 인쇄 그래픽, 질감, 그림자, 반사광은 수정하거나 삭제하지 마 (중요)
+- 패키지 글자와 로고는 절대 OCR로 읽어서 다시 쓰지 마. 원본 이미지 픽셀 그대로 남겨줘 (매우 중요)
+- 작은 글자가 흐릿하더라도 새 글자로 보정하거나 폰트를 바꾸지 마 (매우 중요)
 - 제품 내부 어떤 영역도 투명하게 만들지 마 (중요)
 - 밝은색, 흰색, 하이라이트 영역도 제품 일부로 간주하고, 삭제하지 마 (중요)
 - 제품 바깥 배경은 순수 밝은 초록색(#00FF00) 단색으로 채워줘. 투명 배경으로 만들지 마
@@ -1462,6 +1501,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 제품 안쪽을 구멍처럼 뚫지 마세요. 패키지 내부에 투명 구멍을 만들지 마세요.
 - 패키지 내부 배경색, 그라데이션, 무늬, 질감 → 모두 상품의 일부
 - 패키지 위의 텍스트, 로고, 일러스트, 성분표, 바코드
+- 모든 한글·영문 텍스트는 원본 모양 그대로 보존. 오탈자 교정, 번역, 재타이핑, 새 폰트 생성 금지
 - 패키지 형태·구조 전체
 
 ━━ 제거 대상 (선택한 제품 외곽선 바깥만) ━━
@@ -1475,7 +1515,8 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 1. 가장 대표적으로 보이는 단일 제품 1개의 정확한 외곽 실루엣을 먼저 파악
 2. 실루엣 바깥은 투명 처리하지 말고 #00FF00 단색 배경으로 채우기
 3. 실루엣 안쪽 픽셀은 원본 그대로 100% 복사 — 색상·형태·화질 변경 절대 금지
-4. 실루엣 안쪽에 투명한 빈 공간이 생기지 않았는지 확인하고, 생겼다면 원래 패키지 색으로 복원
+4. 실루엣 안쪽의 글자·로고·라벨은 다시 그리지 말고 원본 픽셀을 그대로 유지
+5. 실루엣 안쪽에 투명한 빈 공간이 생기지 않았는지 확인하고, 생겼다면 원래 패키지 색으로 복원
 
 ━━ 가려진 부분 복원 ━━
 손·소품으로 가려진 패키지 부분이 있다면 동일 패키지의 색상·패턴으로 자연스럽게 복원하세요.
@@ -1794,7 +1835,7 @@ async function doCleanseImage(srcDataUrl) {
       cleanupDetachedResidue(d, sw, sh, 18);
 
       // Step 3: Find content bounding box
-      const bbox = getContentBBox(d, sw, sh, 18);
+      const bbox = getRobustContentBBox(d, sw, sh, 18);
       if (!bbox) { reject(new Error('내용물을 찾을 수 없습니다')); return; }
 
       // Write modified image data back
