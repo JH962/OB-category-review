@@ -463,14 +463,14 @@ const IMAGE_REVIEW_RULES = [
   '가려진 상품이 동일 패키지 형태로 자연스럽게 복원되었는가',
   '상품이 캔버스 정중앙에 배치되어 있는가',
   '캔버스가 정사각형인가',
-  '상품이 308×308px 기준 200×200px 안전영역 안에 위치하는가 (너무 크거나 작지 않은가)',
+  '상품이 1000×1000px 캔버스의 안전영역 안에 위치하는가 (너무 크거나 작지 않은가)',
   '상품 내부 패키지·라벨·텍스트·로고·색상·질감이 원본과 동일하게 유지되었는가',
   '상품 외부 그림자·반사광·바닥면이 제거되었는가',
   '제품 구도가 정면샷에 가까운가 (명확한 측면/후면/과도한 사선 각도만 문제)',
   '상품 패키지 내부의 흰색/아이보리/밝은 면이 배경처럼 투명하게 뚫리지 않았는가'
 ];
-const OUTPUT_SIZE = 308;
-const OUTPUT_PADDING = 54; // 200px safety area in 308px output
+const OUTPUT_SIZE = 1000;
+const OUTPUT_PADDING = 175; // 기존 308px 출력의 여백 비율을 1000px로 확장
 
 const IMAGE_REQUIRED_ISSUE = { k: 'error', m: '이미지 미첨부 — 이미지 업로드는 필수입니다' };
 
@@ -866,11 +866,12 @@ async function validateImage(dataUrl) {
 
       // 요건 6: 최종 캔버스는 정사각형
       const sq = w === h;
+      const targetSizeOk = w === OUTPUT_SIZE && h === OUTPUT_SIZE;
       const wOk = w % 77 === 0, hOk = h % 77 === 0;
       if (!sq) {
         issues.push({ k: 'error', r: 6, m: `정사각형 아님 (현재 ${w}×${h}px)` });
-      } else if (!wOk || !hOk) {
-        issues.push({ k: 'warn', r: 6, m: `77의 배수 권장 — 77, 154, 231, 308px 등` });
+      } else if (!targetSizeOk && (!wOk || !hOk)) {
+        issues.push({ k: 'warn', r: 6, m: `권장 출력 크기 ${OUTPUT_SIZE}×${OUTPUT_SIZE}px` });
       } else {
         issues.push({ k: 'ok', r: 6, m: `정사각형 정상 (${w}×${h}px)` });
       }
@@ -1266,7 +1267,7 @@ async function correctAngleWithGemini(dataUrl, apiKey) {
 - 투명 배경 영역 (배경 새로 생성하거나 색상 채우기 금지)
 
 ━━ 배치 & 출력 ━━
-- 308×308px 캔버스, 제품을 200×200px 안전영역 안에 정중앙 배치
+- 1000×1000px 캔버스, 제품을 안전 여백 안에 정중앙 배치
 - PNG, 실제 알파 채널 투명 배경 (체크무늬 절대 금지)
 - 그림자·바닥면·배경색 생성 금지`;
 
@@ -1365,7 +1366,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 여러 제품이면 주요 제품 1개만 남기기
 
 ━━ 배치 & 출력 ━━
-- 308×308px 캔버스, 제품을 200×200px 안전영역 안에 정중앙 배치
+- 1000×1000px 캔버스, 제품을 안전 여백 안에 정중앙 배치
 - PNG, 실제 알파 채널 투명 배경 (체크무늬 절대 금지)
 - 제품 외 그림자·바닥면 생성 금지`;
 
@@ -1425,9 +1426,9 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - "정면" 기준: 제품 전면 라벨이 카메라를 바라보는 상태
 
 ━━ 배치 & 크기 ━━
-- 308×308px 캔버스 정중앙 배치
-- 제품이 200×200px 안전영역 안에 들어오도록 조정 (상하좌우 여백 약 54px)
-- 너무 작으면 200px에 가깝게, 너무 크면 200px 이내로 줄이세요
+- 1000×1000px 캔버스 정중앙 배치
+- 제품이 캔버스 안전 여백 안에 들어오도록 조정
+- 너무 작거나 크지 않게, 제품 외곽 기준 상하좌우 여백을 충분히 확보하세요
 
 ━━ 출력 규칙 ━━
 - PNG로 출력하되, 배경은 투명하지 않은 순수 밝은 초록색(#00FF00) 단색이어야 합니다
@@ -1736,7 +1737,7 @@ async function doCleanseImage(srcDataUrl) {
       // Write modified image data back
       srcCtx.putImageData(imgData, 0, 0);
 
-      // Step 4: Output 308×308 canvas centered with OUTPUT_PADDING.
+      // Step 4: Output fixed-size canvas centered with OUTPUT_PADDING.
       const OUTPUT = OUTPUT_SIZE, PAD = OUTPUT_PADDING;
       const contentW = bbox.maxX - bbox.minX + 1;
       const contentH = bbox.maxY - bbox.minY + 1;
@@ -1942,8 +1943,8 @@ function reviewCheckForDisplay(check, item) {
     return { ...check, status: 'ok', message: '상품을 중앙정렬했습니다.' };
   }
   if (rule === 6 || /정사각형|정방형/.test(msg)) {
-    // 클렌징 후 출력은 항상 308×308 정사각형
-    return { ...check, status: 'ok', message: '308×308px 정사각형으로 변환했습니다.' };
+    // 클렌징 후 출력은 항상 1000×1000 정사각형
+    return { ...check, status: 'ok', message: '1000×1000px 정사각형으로 변환했습니다.' };
   }
   if ((rule === 7 || /여백|안전영역|크기/.test(msg)) && cleanRuleOk(7)) {
     return { ...check, status: 'ok', message: '안전영역에 맞춰 여백을 조정했습니다.' };
