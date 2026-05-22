@@ -862,7 +862,7 @@ async function validateImage(dataUrl) {
 
 // ── Key status indicator ───────────────────────────────────
 function updateKeyStatus() {
-  const geminiKey  = document.getElementById('gemini-key')?.value?.trim();
+  const geminiKey   = document.getElementById('gemini-key')?.value?.trim();
   const removebgKey = document.getElementById('removebg-key')?.value?.trim();
   const el = document.getElementById('key-status');
   if (!el) return;
@@ -1107,21 +1107,8 @@ async function runObjectRemoval(itemId) {
     item.cleanData = await removeObjectsWithGemini(srcDataUrl, geminiKey);
     item.cleanMode = 'object-removal';
   } catch(e) {
-    if (resolvedMethod === 'removebg' && hasGm && isRemoveBgQuotaError(e)) {
-      item.loadingMsg = '✨ remove.bg 대신 Gemini 클렌징 중...';
-      render();
-      try {
-        item.cleanData = await cleanseWithGemini(item.img.dataUrl, geminiKey, false);
-        item.cleanMode = 'precise';
-        item.cleanNotice = 'remove.bg 크레딧이 부족해 Gemini 클렌징으로 대신 처리했어요.';
-      } catch(fallbackError) {
-        item.cleanData = null;
-        item.cleanError = `${e.message || String(e)} Gemini 대체 처리도 실패했습니다: ${fallbackError.message || String(fallbackError)}`;
-      }
-    } else {
-      item.cleanData  = null;
-      item.cleanError = e.message || String(e);
-    }
+    item.cleanData  = null;
+    item.cleanError = e.message || String(e);
   }
   item.loadingMsg = null;
   render();
@@ -1261,8 +1248,9 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 제품 패키지 자체의 색상·디자인은 절대 변경하지 마세요.
 
 ━━ 절대 건드리면 안 되는 것 (상품 패키지 전체) ━━
-제품 외곽선 안쪽은 단 하나의 픽셀도 변경 금지입니다:
-- 패키지 본체 색상 (초록색·흰색·검정·파랑·노랑 등 어떤 색이든 전부 보존)
+⚠️ 색깔로 판단하지 말고 반드시 형태(실루엣)로 판단하세요:
+- 패키지 실루엣 안쪽이면 → 흰색이든, 배경색과 같은 색이든, 어떤 색이든 100% 보존
+- 패키지 위의 흰색 영역, 흰 텍스트, 흰 배경 무늬 → 전부 제품의 일부, 절대 투명 처리 금지
 - 패키지 내부 배경색, 그라데이션, 무늬, 질감 → 모두 상품의 일부
 - 패키지 위의 텍스트, 로고, 일러스트, 성분표, 바코드
 - 패키지 형태·구조 전체
@@ -1281,6 +1269,11 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 ━━ 가려진 부분 복원 ━━
 손·소품으로 가려진 패키지 부분이 있다면 동일 패키지의 색상·패턴으로 자연스럽게 복원하세요.
 단, 텍스트·로고는 원본에 있는 것만 복원하고 임의 생성 금지.
+
+━━ 구도 보정 ━━
+- 현재 구도가 측면·사선·과도한 앙각/부감이면 → 정면 구도(front view)로 교정하세요
+- 이미 완전한 정면샷이면 → 구도 변경하지 말고 그대로 유지
+- "정면" 기준: 제품 전면 라벨이 카메라를 바라보는 상태
 
 ━━ 배치 & 크기 ━━
 - 308×308px 캔버스 정중앙 배치
@@ -1457,6 +1450,76 @@ async function runAiCleansAndReview(itemId, method = 'auto') {
   render();
 }
 
+// ── Gemini 전체 보정 (누끼 + 오브제 제거 + 각도 보정, 원본 기준) ──────────
+async function runGeminiFullCleanse(itemId) {
+  const item = items.find(i => i.id === itemId);
+  if (!item || !item.img) return;
+  // 기존 cleanData 백업 (되돌리기용)
+  if (item.cleanData && item.cleanData !== 'loading' && item.cleanData.dataUrl) {
+    item.prevCleanData = item.cleanData;
+    item.prevCleanMode = item.cleanMode;
+  }
+  item.cleanError = null;
+  await runAiCleansAndReview(itemId, 'precise');
+}
+
+// ── 2단계 정밀 클렌징: Gemini(오브제 제거) → remove.bg(배경 제거) ──────────
+async function runTwoStepCleanse(itemId) {
+  const item = items.find(i => i.id === itemId);
+  if (!item || !item.img) return;
+
+  const removebgKey = document.getElementById('removebg-key')?.value?.trim();
+  const geminiKey   = document.getElementById('gemini-key')?.value?.trim();
+  if (!removebgKey || removebgKey.length <= 10) { item.cleanError = 'remove.bg 키가 필요해요'; render(); return; }
+  if (!geminiKey   || geminiKey.length   <= 10) { item.cleanError = 'Gemini 키가 필요해요';   render(); return; }
+
+  if (item.cleanData && item.cleanData !== 'loading' && item.cleanData.dataUrl) {
+    item.prevCleanData = item.cleanData;
+    item.prevCleanMode = item.cleanMode;
+  }
+
+  item.cleanData  = 'loading';
+  item.aiReview   = 'loading';
+  item.cleanError = null;
+  item.loadingMsg = '✨ Gemini 오브제 제거 중... (1/2)';
+  render();
+
+  try {
+    // Step 1: Gemini로 오브제 제거 (배경 유지)
+    const step1DataUrl = await cleanseWithGemini(item.img.dataUrl, geminiKey, false);
+    const step1PngDataUrl = await new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const c = document.createElement('canvas');
+        c.width = img.naturalWidth; c.height = img.naturalHeight;
+        c.getContext('2d').drawImage(img, 0, 0);
+        resolve(c.toDataURL('image/png'));
+      };
+      img.onerror = () => reject(new Error('이미지 변환 실패'));
+      img.src = step1DataUrl.dataUrl || step1DataUrl;
+    });
+
+    // Step 2: remove.bg로 배경 제거
+    item.loadingMsg = '🧹 remove.bg 배경 제거 중... (2/2)';
+    render();
+    item.cleanData = await cleanseWithRemoveBg(step1PngDataUrl, removebgKey);
+    item.cleanMode = 'two-step';
+  } catch(e) {
+    item.cleanData  = null;
+    item.cleanError = e.message || String(e);
+  }
+
+  if (item.cleanData?.dataUrl) {
+    item.loadingMsg = '🔎 결과 이미지 검수 중...';
+    render();
+    item.aiReview = await reviewImageWithGemini(item.cleanData.dataUrl, geminiKey).catch(e => ({ error: e.message }));
+  } else {
+    item.aiReview = null;
+  }
+  item.loadingMsg = null;
+  render();
+}
+
 // ── Image Cleansing ────────────────────────────────────────
 async function cleanseImage(itemId) {
   const item = items.find(i => i.id === itemId);
@@ -1589,10 +1652,22 @@ function addItem() {
   document.getElementById('char-count').className = 'char-count';
   clearPending();
   render();
-  // remove.bg 키 있으면 추가 즉시 자동 클렌징 실행
   const removebgKeyAuto = document.getElementById('removebg-key')?.value?.trim();
-  if (removebgKeyAuto && removebgKeyAuto.length > 10) {
+  const geminiKeyAuto   = document.getElementById('gemini-key')?.value?.trim();
+  const hasRbAuto = !!(removebgKeyAuto && removebgKeyAuto.length > 10);
+  const hasGmAuto = !!(geminiKeyAuto   && geminiKeyAuto.length   > 10);
+
+  // 우선순위: 2단계(rb+gm) > remove.bg > Gemini
+  if (hasRbAuto && hasGmAuto) {
+    runTwoStepCleanse(newItem.id);       // 둘 다 있으면 2단계
+  } else if (hasRbAuto) {
     runAiCleansAndReview(newItem.id, 'removebg');
+  } else if (hasGmAuto) {
+    runGeminiFullCleanse(newItem.id);
+  }
+
+  if (hasGmAuto) {
+    runSpacingCheck(newItem.id);         // 띄어쓰기 검수
   }
 }
 
@@ -1852,14 +1927,28 @@ function renderCard(item) {
       let cleanResultHtml = '';
       let retryRemoveBgHtml = '';
       if (item.cleanData?.dataUrl) {
-        const modeTag = item.cleanMode === 'removebg' ? '<span style="background:var(--color-white);color:var(--color-olive-green-90);border:1px solid var(--color-success-line);padding:1px 6px;border-radius:999px;font-size:9px;font-weight:800;margin-left:4px">remove.bg</span>'
+        const modeTag = item.cleanMode === 'removebg'      ? '<span style="background:var(--color-white);color:var(--color-olive-green-90);border:1px solid var(--color-success-line);padding:1px 6px;border-radius:999px;font-size:9px;font-weight:800;margin-left:4px">remove.bg</span>'
           : item.cleanMode === 'object-removal' ? '<span style="background:var(--color-gray-5);color:var(--color-gray-80);padding:1px 6px;border-radius:999px;font-size:9px;font-weight:800;margin-left:4px">AI 오브제 제거</span>'
+          : item.cleanMode === 'precise'        ? '<span style="background:var(--color-info-bg);color:var(--color-system-blue);border:1px solid #BFDBFE;padding:1px 6px;border-radius:999px;font-size:9px;font-weight:800;margin-left:4px">Gemini 전체 보정</span>'
+          : item.cleanMode === 'two-step'       ? '<span style="background:linear-gradient(135deg,#f0fdf4,#eff6ff);color:#166534;border:1px solid #86efac;padding:1px 6px;border-radius:999px;font-size:9px;font-weight:800;margin-left:4px">2단계 정밀</span>'
           : '';
-        const rbKeyForResult = document.getElementById('removebg-key')?.value?.trim();
+        const rbKeyForResult  = document.getElementById('removebg-key')?.value?.trim();
+        const gmKeyForResult  = document.getElementById('gemini-key')?.value?.trim();
         const hasRbKeyForResult = rbKeyForResult && rbKeyForResult.length > 10;
+        const hasGmKeyForResult = gmKeyForResult && gmKeyForResult.length > 10;
         retryRemoveBgHtml = hasRbKeyForResult
-          ? `<button class="cleanse-btn" style="background:var(--color-gray-10);color:var(--color-gray-70);border-color:var(--color-gray-30);margin-top:8px" onclick="runAiCleansAndReview(${item.id},'removebg')">🔄 배경 제거·규격 맞춤 재시도</button>`
+          ? `<button class="cleanse-btn" style="background:var(--color-gray-10);color:var(--color-gray-70);border-color:var(--color-gray-30);margin-top:4px" onclick="runAiCleansAndReview(${item.id},'removebg')">🔄 remove.bg 재시도</button>`
           : '';
+        const prevLabel = item.prevCleanMode === 'removebg' ? 'remove.bg 버전' : '이전 버전';
+        const revertBtnHtml = item.prevCleanData
+          ? `<button class="cleanse-btn" style="background:var(--color-gray-5);color:var(--color-gray-60);border-color:var(--color-gray-20);margin-top:4px;font-size:12px" onclick="revertCleanData(${item.id})">↩ ${prevLabel}으로 돌아가기</button>`
+          : '';
+        const retryBtnsHtml = `
+          <div style="display:flex;flex-direction:column;gap:4px;margin-top:8px">
+            ${hasGmKeyForResult ? `<button class="cleanse-btn" style="background:linear-gradient(135deg,#e0e7ff 0%,#ede9fe 100%);color:#4338ca;border-color:#c4b5fd;font-weight:700" onclick="runGeminiFullCleanse(${item.id})">✨ Gemini로 다시 보정</button>` : ''}
+            ${retryRemoveBgHtml}
+            ${revertBtnHtml}
+          </div>`;
         cleanResultHtml = `
           <div class="cleanse-result">
             <div class="section-mini-label" style="color:var(--color-gray-80);margin-bottom:8px">클렌징 완료${modeTag}</div>
@@ -1876,7 +1965,7 @@ function renderCard(item) {
               </div>
             </div>
             <a class="dl-btn" href="${item.cleanData.dataUrl}" download="${esc(item.text)}_clean.png" style="background:var(--color-system-blue);border-radius:8px">PNG 다운로드</a>
-            ${retryRemoveBgHtml}
+            ${retryBtnsHtml}
           </div>`;
       } else if (item.cleanError) {
         cleanResultHtml = `<div class="cleanse-error">클렌징 실패: ${esc(item.cleanError)}</div>`;
@@ -1899,28 +1988,25 @@ function renderCard(item) {
         </div>`;
     } else {
       const rbKey = document.getElementById('removebg-key')?.value?.trim();
-      const hasRbKey = rbKey && rbKey.length > 10;
       const gmKey = document.getElementById('gemini-key')?.value?.trim();
+      const hasRbKey = rbKey && rbKey.length > 10;
       const hasGmKey = gmKey && gmKey.length > 10;
-      const showObjectRemoval = hasGmKey && needsObjectRemoval(item);
-      const objectRemovalHint = showObjectRemoval
-        ? '<p style="font-size:11px;color:var(--color-gray-60);line-height:1.55;margin:6px 0 0">제품 외 손·소품·증정품이 감지됐어요. 필요하면 아래 버튼으로 한 번 더 정리해보세요.</p>'
-        : '';
       cleanseHtml = `
         <div class="cleanse-section">
           <p style="font-size:12px;color:var(--color-gray-60);line-height:1.6;margin-bottom:8px">아래 버튼을 눌러서 이미지 가공을 진행해주세요.</p>
           <div style="display:flex;flex-direction:column;gap:6px">
-            ${hasRbKey
-              ? `<button class="cleanse-btn" style="background:var(--color-olive-green-90);color:var(--color-white);border-color:var(--color-olive-green-90);font-size:13px;padding:10px" onclick="runAiCleansAndReview(${item.id},'removebg')">🧹 배경 제거·규격 맞춤</button>
-                 <p style="font-size:10px;color:var(--color-gray-40);margin-top:-2px;line-height:1.5;margin-bottom:2px">배경·소품·오브제 제거 + 크기 정규화</p>`
-              : `<div style="font-size:11px;color:var(--color-gray-50);background:var(--color-gray-5);border:1px solid var(--color-gray-15);border-radius:7px;padding:8px 10px">remove.bg 키 입력 시 배경·오브제 제거가 가능해요</div>`
-            }
-            ${showObjectRemoval
-              ? `${objectRemovalHint}
-                 <button class="cleanse-btn" style="background:var(--color-gray-5);color:var(--color-gray-80);border-color:var(--color-gray-30)" onclick="runObjectRemoval(${item.id})">✋ 손·오브제 AI 제거</button>
-                 <p style="font-size:10px;color:var(--color-gray-40);margin-top:-2px;line-height:1.5">AI 검수에서 손·오브제가 감지되어 표시됩니다</p>`
-              : ''
-            }
+            ${hasRbKey ? `
+              <button class="cleanse-btn" style="background:var(--color-olive-green-90);color:var(--color-white);border-color:var(--color-olive-green-90);font-size:13px;padding:10px" onclick="runAiCleansAndReview(${item.id},'removebg')">🧹 배경 제거·규격 맞춤</button>
+              <p style="font-size:10px;color:var(--color-gray-40);margin-top:-2px;line-height:1.5;margin-bottom:2px">배경·소품·오브제 제거 + 크기 정규화</p>
+            ` : `<div style="font-size:11px;color:var(--color-gray-50);background:var(--color-gray-5);border:1px solid var(--color-gray-15);border-radius:7px;padding:8px 10px">remove.bg 또는 Gemini 키 입력 시 클렌징이 가능해요</div>`}
+            ${hasGmKey ? `
+              <button class="cleanse-btn" style="background:linear-gradient(135deg,#e0e7ff 0%,#ede9fe 100%);color:#4338ca;border-color:#c4b5fd;font-weight:700" onclick="runGeminiFullCleanse(${item.id})">✨ Gemini 전체 보정</button>
+              <p style="font-size:10px;color:var(--color-gray-40);margin-top:-2px;line-height:1.5;margin-bottom:2px">누끼 + 손·오브제 제거 + 각도 보정</p>
+            ` : ''}
+            ${hasRbKey && hasGmKey ? `
+              <button class="cleanse-btn" style="background:linear-gradient(135deg,#f0fdf4 0%,#eff6ff 100%);color:#166534;border-color:#86efac;font-weight:700" onclick="runTwoStepCleanse(${item.id})">🎯 2단계 정밀 클렌징</button>
+              <p style="font-size:10px;color:var(--color-gray-40);margin-top:-2px;line-height:1.5;margin-bottom:2px">Gemini(오브제 정리) → remove.bg(배경 제거)</p>
+            ` : ''}
           </div>
           ${item.cleanError ? `<div class="cleanse-error" style="margin-top:8px">${esc(item.cleanError)}</div>` : ''}
         </div>`;
@@ -1976,10 +2062,36 @@ function scrollCard(id) {
   if (el) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
+function revertCleanData(id) {
+  const item = items.find(i => i.id === id);
+  if (!item?.prevCleanData) return;
+  const currentData = item.cleanData;
+  const currentMode = item.cleanMode;
+  item.cleanData = item.prevCleanData;
+  item.cleanMode = item.prevCleanMode || null;
+  item.prevCleanData = currentData && currentData !== 'loading' ? currentData : null;
+  item.prevCleanMode = currentMode || null;
+  item.cleanError = null;
+  item.loadingMsg = null;
+  render();
+}
+
+function runSpacingCheck(id) {
+  const item = items.find(i => i.id === id);
+  if (!item) return;
+  const tv = validateText(item.text);
+  item.tv = tv;
+  render();
+}
+
 // Enter key
 document.getElementById('text-input').addEventListener('keydown', e => {
   if (e.key === 'Enter') addItem();
 });
+
+// API 키 입력 시 카드 버튼 재렌더링 (키 입력하면 버튼 표시/숨김 갱신)
+document.getElementById('removebg-key').addEventListener('input', () => render());
+document.getElementById('gemini-key').addEventListener('input', () => render());
 
 render();
 </script>
