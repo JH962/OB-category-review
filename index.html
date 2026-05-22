@@ -706,7 +706,20 @@ async function restoreInteriorAlphaHoles(srcDataUrl) {
       ctx.drawImage(img, 0, 0);
       const imgData = ctx.getImageData(0, 0, w, h);
       const d = imgData.data;
-      const bbox = getContentBBox(d, w, h, 24);
+      let minX = w, maxX = -1, minY = h, maxY = -1;
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const pi = (y * w + x) * 4;
+          const a = d[pi + 3], r = d[pi], g = d[pi + 1], b = d[pi + 2];
+          const hasVisibleAlpha = a > 24;
+          const hasPreservedColor = a <= 24 && Math.max(r, g, b) > 18;
+          if (hasVisibleAlpha || hasPreservedColor) {
+            if (x < minX) minX = x; if (x > maxX) maxX = x;
+            if (y < minY) minY = y; if (y > maxY) maxY = y;
+          }
+        }
+      }
+      const bbox = maxX < 0 ? null : { minX, maxX, minY, maxY };
       if (!bbox) { resolve(srcDataUrl); return; }
 
       const alphaAt = (x, y) => d[(y * w + x) * 4 + 3];
@@ -738,12 +751,13 @@ async function restoreInteriorAlphaHoles(srcDataUrl) {
         for (let x = bbox.minX + 2; x <= bbox.maxX - 2; x++) {
           const pi = (y * w + x) * 4;
           if (d[pi + 3] > 24) continue;
+          const hasOwnColor = Math.max(d[pi], d[pi + 1], d[pi + 2]) > 18;
           const enclosed =
             hasOpaqueInDir(x, y, -1, 0) &&
             hasOpaqueInDir(x, y, 1, 0) &&
             hasOpaqueInDir(x, y, 0, -1) &&
             hasOpaqueInDir(x, y, 0, 1);
-          if (!enclosed) continue;
+          if (!enclosed && !hasOwnColor) continue;
           const rgbLooksEmpty = d[pi] < 5 && d[pi + 1] < 5 && d[pi + 2] < 5;
           if (rgbLooksEmpty) {
             const [r, g, b] = nearestOpaqueColor(x, y);
@@ -1317,12 +1331,19 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 제품 외 그림자·바닥면 생성 금지`;
 
   // ── 정밀 클렌징 프롬프트 (원본 픽셀 최대한 보존) ─────────────────────
-  const prompt = generative ? generativePrompt : `제품 1개만 남기고 나머지 제품·소품·배경을 지워주세요.
-단, 선택한 제품 패키지 안의 색상은 절대 지우지 마세요.
+  const prompt = generative ? generativePrompt : `이미지에서 가장 좌측 제품 1개만 남기고 나머지는 지워주고, 배경도 지워줘.
+
+중요:
+- 제품 패키지의 로고, 글자, 색상, 그래픽, 그림자, 질감, 비닐 반사광은 절대 수정하지 말고 원본 그대로 유지해줘
+- 제품 패키지 내부를 투명하게 만들지 마
+- 제품 패키지의 흰색/밝은색 영역도 배경이 아니라 제품 인쇄면이므로 삭제하지 마
+- 제품 외부에 있는 다른 요소와 스티커(앰블럼)만 제거해줘
+- 최종 결과는 제품 바깥 배경만 투명하게 만들어줘
+- 제품은 1개만 남기고, 정중앙에 배치해줘
 
 ━━ 이 작업의 핵심 ━━
-배경 제거가 아니라 "대표 제품 1개 추출"입니다.
-가장 앞에 있거나 가장 크게 보이는 대표 판매 제품 1개만 남기고, 나머지는 모두 제거하세요.
+배경 제거가 아니라 "가장 좌측 제품 1개 추출"입니다.
+가장 좌측에 있는 대표 판매 제품 1개만 남기고, 나머지는 모두 제거하세요.
 하지만 선택한 제품 패키지 자체의 색상·디자인은 절대 변경하지 마세요.
 
 ━━ 절대 건드리면 안 되는 것 (상품 패키지 전체) ━━
@@ -1343,7 +1364,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 팝콘 알갱이, 과일, 잎, 꽃, 스티커형 강조 배지처럼 제품 밖 장식물 제거
 
 ━━ 작업 순서 ━━
-1. 대표 제품 1개의 정확한 외곽 실루엣을 먼저 파악
+1. 가장 좌측 제품 1개의 정확한 외곽 실루엣을 먼저 파악
 2. 실루엣 바깥만 투명 처리
 3. 실루엣 안쪽 픽셀은 원본 그대로 100% 복사 — 색상·형태·화질 변경 절대 금지
 4. 실루엣 안쪽에 투명한 빈 공간이 생기지 않았는지 확인하고, 생겼다면 원래 패키지 색으로 복원
