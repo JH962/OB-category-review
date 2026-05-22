@@ -639,11 +639,43 @@ function removeArtificialEdgeBackground(d, w, h) {
   }
 }
 
+function removeChromaKeyBackground(d, w, h) {
+  function isChroma(idx) {
+    const pi = idx * 4, a = d[pi + 3];
+    if (a < 15) return true;
+    const r = d[pi], g = d[pi + 1], b = d[pi + 2];
+    const neonGreen = g > 170 && r < 110 && b < 140 && g - Math.max(r, b) > 70;
+    const neonMagenta = r > 170 && b > 150 && g < 120 && Math.min(r, b) - g > 60;
+    return neonGreen || neonMagenta;
+  }
+  const visited = new Uint8Array(w * h);
+  const queue = [];
+  function push(x, y) {
+    const idx = y * w + x;
+    if (!visited[idx]) {
+      visited[idx] = 1;
+      if (isChroma(idx)) queue.push(idx);
+    }
+  }
+  for (let x = 0; x < w; x++) { push(x, 0); push(x, h - 1); }
+  for (let y = 1; y < h - 1; y++) { push(0, y); push(w - 1, y); }
+  while (queue.length) {
+    const idx = queue.pop();
+    d[idx * 4 + 3] = 0;
+    const x = idx % w, y = (idx / w) | 0;
+    if (x > 0) push(x - 1, y);
+    if (x < w - 1) push(x + 1, y);
+    if (y > 0) push(x, y - 1);
+    if (y < h - 1) push(x, y + 1);
+  }
+}
+
 async function normalizeProductPng(srcDataUrl, options = {}) {
   const output = options.output || OUTPUT_SIZE;
   const pad = options.pad || OUTPUT_PADDING;
   const forceOpaqueContent = options.forceOpaqueContent ?? false;
   const removeCheckerboard = options.removeCheckerboard ?? true;
+  const removeChromaKey = options.removeChromaKey ?? false;
   return new Promise((resolve, reject) => {
     const img = new Image();
     img.onload = () => {
@@ -659,11 +691,16 @@ async function normalizeProductPng(srcDataUrl, options = {}) {
       if (removeCheckerboard) {
         removeArtificialEdgeBackground(d, sw, sh);
       }
+      if (removeChromaKey) {
+        removeChromaKeyBackground(d, sw, sh);
+      }
 
       if (forceOpaqueContent) {
         for (let i = 3; i < d.length; i += 4) {
           if (d[i] > 8) d[i] = 255;
         }
+        srcCtx.putImageData(imgData, 0, 0);
+      } else {
         srcCtx.putImageData(imgData, 0, 0);
       }
 
@@ -1340,11 +1377,12 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 제품의 로고, 글자, 색상, 인쇄 그래픽, 질감, 그림자, 반사광은 수정하거나 삭제하지 마 (중요)
 - 제품 내부 어떤 영역도 투명하게 만들지 마 (중요)
 - 밝은색, 흰색, 하이라이트 영역도 제품 일부로 간주하고, 삭제하지 마 (중요)
-- 투명하게 처리해야 하는 부분은 오직 제품 바깥 배경뿐이야 (중요)
-- 결과물은 투명 배경 PNG로 만들고, 제품은 중앙에 배치해줘
+- 제품 바깥 배경은 순수 밝은 초록색(#00FF00) 단색으로 채워줘. 투명 배경으로 만들지 마
+- 제품은 1개만 남기고, 중앙에 배치해줘
 
 금지사항:
 - 제품 내부 투명화 금지
+- 투명 배경 출력 금지
 - 로고/텍스트/그래픽 손상 금지
 
 ━━ 이 작업의 핵심 ━━
@@ -1363,7 +1401,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 패키지 형태·구조 전체
 
 ━━ 제거 대상 (선택한 제품 외곽선 바깥만) ━━
-- 이미지 전체 배경색/배경 이미지/스튜디오 배경지/테이블/바닥/천
+- 이미지 전체 배경색/배경 이미지/스튜디오 배경지/테이블/바닥/천은 제거하고 #00FF00 단색 배경으로 대체
 - 제품 외부의 그림자, 반사광, 바닥면
 - 제품 주변의 손, 팔, 소품, 증정품, 추가 제품, 장식 오브제
 - 여러 제품/여러 맛/여러 옵션이 있을 경우 대표 제품 1개만 남기고 나머지 제거
@@ -1371,7 +1409,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 
 ━━ 작업 순서 ━━
 1. 가장 대표적으로 보이는 단일 제품 1개의 정확한 외곽 실루엣을 먼저 파악
-2. 실루엣 바깥만 투명 처리
+2. 실루엣 바깥은 투명 처리하지 말고 #00FF00 단색 배경으로 채우기
 3. 실루엣 안쪽 픽셀은 원본 그대로 100% 복사 — 색상·형태·화질 변경 절대 금지
 4. 실루엣 안쪽에 투명한 빈 공간이 생기지 않았는지 확인하고, 생겼다면 원래 패키지 색으로 복원
 
@@ -1390,7 +1428,8 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
 - 너무 작으면 200px에 가깝게, 너무 크면 200px 이내로 줄이세요
 
 ━━ 출력 규칙 ━━
-- PNG, 투명 배경은 반드시 실제 알파 채널 사용 (체크무늬·격자무늬 그리기 절대 금지)
+- PNG로 출력하되, 배경은 투명하지 않은 순수 밝은 초록색(#00FF00) 단색이어야 합니다
+- 체크무늬·격자무늬·흰색 배경·검정 배경 금지
 - 제품 본체 완전 불투명, 원본 화질 그대로 유지
 - 그림자·새 배경색·바닥면 생성 금지`; // ← 정밀 클렌징 프롬프트 끝
 
@@ -1486,6 +1525,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
   const normalized = await normalizeProductPng(repairedDataUrl, {
     forceOpaqueContent: !edgeInfo.hasRealAlpha || edgeInfo.hasArtificialBg,
     removeCheckerboard: !edgeInfo.hasRealAlpha || edgeInfo.hasArtificialBg,
+    removeChromaKey: true,
     pad: OUTPUT_PADDING
   });
   normalized.aiCleansed = true;
