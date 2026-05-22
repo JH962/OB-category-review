@@ -591,6 +591,66 @@ function getContentBBox(d, w, h, alphaThresh) {
   return maxX < 0 ? null : { minX, maxX, minY, maxY };
 }
 
+function cleanupDetachedResidue(d, w, h, alphaThresh) {
+  const thr = alphaThresh ?? 18;
+  const total = w * h;
+  const visited = new Uint8Array(total);
+  const components = [];
+  const stack = [];
+
+  for (let i = 0; i < total; i++) {
+    if (visited[i] || d[i * 4 + 3] <= thr) continue;
+    let minX = w, maxX = -1, minY = h, maxY = -1, area = 0;
+    const pixels = [];
+    visited[i] = 1;
+    stack.push(i);
+
+    while (stack.length) {
+      const idx = stack.pop();
+      pixels.push(idx);
+      area++;
+      const x = idx % w, y = (idx / w) | 0;
+      if (x < minX) minX = x; if (x > maxX) maxX = x;
+      if (y < minY) minY = y; if (y > maxY) maxY = y;
+
+      const neighbors = [idx - 1, idx + 1, idx - w, idx + w];
+      for (const ni of neighbors) {
+        if (ni < 0 || ni >= total || visited[ni]) continue;
+        const nx = ni % w;
+        if ((ni === idx - 1 && nx !== x - 1) || (ni === idx + 1 && nx !== x + 1)) continue;
+        if (d[ni * 4 + 3] > thr) {
+          visited[ni] = 1;
+          stack.push(ni);
+        }
+      }
+    }
+    components.push({ area, minX, maxX, minY, maxY, pixels });
+  }
+
+  if (!components.length) return null;
+  components.sort((a, b) => b.area - a.area);
+  const main = components[0];
+  const minKeepArea = Math.max(main.area * 0.025, total * 0.00008);
+  for (const comp of components.slice(1)) {
+    if (comp.area >= minKeepArea) continue;
+    for (const idx of comp.pixels) d[idx * 4 + 3] = 0;
+  }
+  return { minX: main.minX, maxX: main.maxX, minY: main.minY, maxY: main.maxY };
+}
+
+function removeShadowFringe(d, w, h) {
+  for (let i = 0; i < w * h; i++) {
+    const pi = i * 4, a = d[pi + 3];
+    if (a <= 0 || a > 110) continue;
+    const r = d[pi], g = d[pi + 1], b = d[pi + 2];
+    const max = Math.max(r, g, b), min = Math.min(r, g, b);
+    const sat = max === 0 ? 0 : (max - min) / max;
+    const shadowLike = max < 150 && sat < 0.35;
+    const greenResidue = g > 95 && g - r > 18 && g - b > 22;
+    if (shadowLike || greenResidue) d[pi + 3] = 0;
+  }
+}
+
 function getMimeFromDataUrl(dataUrl) {
   const sep = dataUrl.indexOf(',');
   const mimeMatch = dataUrl.slice(0, sep).match(/:(.*?);/);
@@ -696,6 +756,8 @@ async function normalizeProductPng(srcDataUrl, options = {}) {
       if (removeChromaKey) {
         removeChromaKeyBackground(d, sw, sh);
       }
+      removeShadowFringe(d, sw, sh);
+      cleanupDetachedResidue(d, sw, sh, 18);
 
       if (forceOpaqueContent) {
         for (let i = 3; i < d.length; i += 4) {
@@ -706,7 +768,7 @@ async function normalizeProductPng(srcDataUrl, options = {}) {
         srcCtx.putImageData(imgData, 0, 0);
       }
 
-      const bbox = getContentBBox(d, sw, sh, 8);
+      const bbox = getContentBBox(d, sw, sh, 18);
       if (!bbox) { reject(new Error('내용물을 찾을 수 없습니다')); return; }
 
       const contentW = bbox.maxX - bbox.minX + 1;
@@ -1729,9 +1791,11 @@ async function doCleanseImage(srcDataUrl) {
       if (bgColor[3] > 20) {
         floodFillTransparent(d, sw, sh, bgColor);
       }
+      removeShadowFringe(d, sw, sh);
+      cleanupDetachedResidue(d, sw, sh, 18);
 
       // Step 3: Find content bounding box
-      const bbox = getContentBBox(d, sw, sh);
+      const bbox = getContentBBox(d, sw, sh, 18);
       if (!bbox) { reject(new Error('내용물을 찾을 수 없습니다')); return; }
 
       // Write modified image data back
