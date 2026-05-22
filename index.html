@@ -644,9 +644,11 @@ function removeChromaKeyBackground(d, w, h) {
     const pi = idx * 4, a = d[pi + 3];
     if (a < 15) return true;
     const r = d[pi], g = d[pi + 1], b = d[pi + 2];
-    const neonGreen = g > 170 && r < 110 && b < 140 && g - Math.max(r, b) > 70;
+    const neonGreen = g > 145 && b < 170 && g - r > 22 && g - b > 45;
+    const limeGreen = g > 180 && r >= 90 && r < 210 && b < 140 && g - b > 55;
+    const yellowGreen = g > 165 && r > 120 && r < 230 && b < 110 && g - b > 65;
     const neonMagenta = r > 170 && b > 150 && g < 120 && Math.min(r, b) - g > 60;
-    return neonGreen || neonMagenta;
+    return neonGreen || limeGreen || yellowGreen || neonMagenta;
   }
   const visited = new Uint8Array(w * h);
   const queue = [];
