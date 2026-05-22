@@ -694,6 +694,75 @@ async function normalizeProductPng(srcDataUrl, options = {}) {
   });
 }
 
+async function restoreInteriorAlphaHoles(srcDataUrl) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => {
+      const w = img.naturalWidth, h = img.naturalHeight;
+      const cvs = document.createElement('canvas');
+      cvs.width = w; cvs.height = h;
+      const ctx = cvs.getContext('2d', { willReadFrequently: true });
+      ctx.clearRect(0, 0, w, h);
+      ctx.drawImage(img, 0, 0);
+      const imgData = ctx.getImageData(0, 0, w, h);
+      const d = imgData.data;
+      const bbox = getContentBBox(d, w, h, 24);
+      if (!bbox) { resolve(srcDataUrl); return; }
+
+      const alphaAt = (x, y) => d[(y * w + x) * 4 + 3];
+      function hasOpaqueInDir(x, y, dx, dy) {
+        let nx = x + dx, ny = y + dy;
+        while (nx >= bbox.minX && nx <= bbox.maxX && ny >= bbox.minY && ny <= bbox.maxY) {
+          if (alphaAt(nx, ny) > 48) return true;
+          nx += dx; ny += dy;
+        }
+        return false;
+      }
+      function nearestOpaqueColor(x, y) {
+        for (let r = 1; r <= 18; r++) {
+          let rs = 0, gs = 0, bs = 0, n = 0;
+          for (let yy = Math.max(bbox.minY, y - r); yy <= Math.min(bbox.maxY, y + r); yy++) {
+            for (let xx = Math.max(bbox.minX, x - r); xx <= Math.min(bbox.maxX, x + r); xx++) {
+              if (Math.abs(xx - x) !== r && Math.abs(yy - y) !== r) continue;
+              const pi = (yy * w + xx) * 4;
+              if (d[pi + 3] > 80) { rs += d[pi]; gs += d[pi + 1]; bs += d[pi + 2]; n++; }
+            }
+          }
+          if (n) return [Math.round(rs / n), Math.round(gs / n), Math.round(bs / n)];
+        }
+        return [245, 238, 220];
+      }
+
+      let repaired = 0;
+      for (let y = bbox.minY + 2; y <= bbox.maxY - 2; y++) {
+        for (let x = bbox.minX + 2; x <= bbox.maxX - 2; x++) {
+          const pi = (y * w + x) * 4;
+          if (d[pi + 3] > 24) continue;
+          const enclosed =
+            hasOpaqueInDir(x, y, -1, 0) &&
+            hasOpaqueInDir(x, y, 1, 0) &&
+            hasOpaqueInDir(x, y, 0, -1) &&
+            hasOpaqueInDir(x, y, 0, 1);
+          if (!enclosed) continue;
+          const rgbLooksEmpty = d[pi] < 5 && d[pi + 1] < 5 && d[pi + 2] < 5;
+          if (rgbLooksEmpty) {
+            const [r, g, b] = nearestOpaqueColor(x, y);
+            d[pi] = r; d[pi + 1] = g; d[pi + 2] = b;
+          }
+          d[pi + 3] = 255;
+          repaired++;
+        }
+      }
+
+      if (!repaired) { resolve(srcDataUrl); return; }
+      ctx.putImageData(imgData, 0, 0);
+      resolve(cvs.toDataURL('image/png'));
+    };
+    img.onerror = () => reject(new Error('제품 내부 투명 영역 복원 실패'));
+    img.src = srcDataUrl;
+  });
+}
+
 // Edge-seeded flood fill: makes background-colored pixels transparent
 function floodFillTransparent(d, w, h, bgColor) {
   const [br, bg, bb] = bgColor;
@@ -1347,6 +1416,7 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
     img.onerror = () => reject(new Error('결과 이미지 로드 실패'));
     img.src = outDataUrl;
   });
+  const repairedDataUrl = await restoreInteriorAlphaHoles(raw.dataUrl);
 
   // AI 출력이 실제 알파 PNG인지, 체크무늬/검정 배경이 박힌 이미지인지 엣지 픽셀로 판단
   const edgeInfo = await new Promise(res => {
@@ -1383,10 +1453,10 @@ async function cleanseWithGemini(dataUrl, apiKey, generative = false) {
       });
     };
     tmpImg.onerror = () => res({ hasRealAlpha: false, hasArtificialBg: true });
-    tmpImg.src = raw.dataUrl;
+    tmpImg.src = repairedDataUrl;
   });
 
-  const normalized = await normalizeProductPng(raw.dataUrl, {
+  const normalized = await normalizeProductPng(repairedDataUrl, {
     forceOpaqueContent: !edgeInfo.hasRealAlpha || edgeInfo.hasArtificialBg,
     removeCheckerboard: !edgeInfo.hasRealAlpha || edgeInfo.hasArtificialBg,
     pad: OUTPUT_PADDING
